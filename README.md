@@ -11,6 +11,8 @@ uses roughly 5 MB of private memory.
 - **Editing:** click a title or note to edit it. `Enter` saves, `Esc` reverts, and an empty title deletes the task.
 - **Drag and drop:** press, hold briefly, then drag a task to reorder it or move it to another bucket.
 - **Completing:** checking a task sends it to Done. Unchecking it puts it back where it was.
+- **Clear completed:** "Clear" in the Done header deletes every finished task. Click it twice to confirm.
+- **Undo and redo:** with the add box empty, `Ctrl+Z` undoes the last change and `Ctrl+Y` or `Ctrl+Shift+Z` redoes it. After a delete or clear, the footer offers Undo for a few seconds. The last 50 steps are kept until you quit.
 - **Tray app:** closing the window hides it to the tray. `Alt+P` or a tray click toggles it.
 - **Pin:** the pin button keeps the window on top.
 

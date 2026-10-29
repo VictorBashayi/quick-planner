@@ -486,6 +486,8 @@ export component AppWindow inherits Window {
     in property <int> selected: 0;
     in property <string> status;
     in property <bool> has-done;
+    // Set from Rust after a delete or clear; the footer then offers Undo for a while.
+    in-out property <bool> offer-undo;
     in property <string> today;
     in-out property <bool> pinned: true;
 
@@ -500,6 +502,8 @@ export component AppWindow inherits Window {
     callback toggle-collapsed(string);
     callback show-done();
     callback clear-done();
+    callback undo();
+    callback redo();
     callback hide-window();
     callback start-move();
     callback start-resize();
@@ -614,6 +618,17 @@ export component AppWindow inherits Window {
                         if (event.text == Key.Escape) {
                             root.hide-window();
                             return accept;
+                        }
+                        // With an empty box, Ctrl+Z / Ctrl+Y act on tasks; otherwise on the typing.
+                        if (event.modifiers.control && self.text == "") {
+                            if (event.text == "z" && !event.modifiers.shift) {
+                                root.undo();
+                                return accept;
+                            }
+                            if (event.text == "y" || ((event.text == "z" || event.text == "Z") && event.modifiers.shift)) {
+                                root.redo();
+                                return accept;
+                            }
                         }
                         if (event.modifiers.control && event.text == "1") {
                             root.select-bucket(0);
@@ -862,11 +877,24 @@ export component AppWindow inherits Window {
 
                 Rectangle { }
 
-                Text {
+                if !root.offer-undo: Text {
                     text: "Alt+P shows and hides";
                     font-size: 11.5px;
                     color: Palette.faint;
                     vertical-alignment: center;
+                }
+
+                if root.offer-undo: Text {
+                    text: "Undo";
+                    font-size: 11.5px;
+                    color: undo-ta.has-hover ? Palette.espresso : Palette.coffee;
+                    vertical-alignment: center;
+                    undo-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.undo();
+                        }
+                    }
                 }
             }
 
@@ -892,6 +920,14 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    Timer {
+        interval: 6s;
+        running: root.offer-undo;
+        triggered => {
+            root.offer-undo = false;
         }
     }
 

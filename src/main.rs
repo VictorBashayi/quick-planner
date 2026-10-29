@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
-use store::{Bucket, State};
+use store::{Bucket, History, State};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
@@ -19,6 +19,7 @@ slint::include_modules!();
 
 struct App {
     state: RefCell<State>,
+    history: RefCell<History>,
     path: PathBuf,
     save_timer: Timer,
     window: slint::Weak<AppWindow>,
@@ -35,6 +36,18 @@ impl App {
     /// Pushes state into the UI and schedules a save.
     fn changed(self: &Rc<Self>) {
         self.state.borrow_mut().tidy();
+        self.history.borrow_mut().record(&self.state.borrow().tasks);
+        self.refresh();
+        self.schedule_save();
+    }
+
+    /// Puts back the task list from undo (`redo` false) or redo history.
+    fn step_history(self: &Rc<Self>, redo: bool) {
+        let mut history = self.history.borrow_mut();
+        let Some(tasks) = (if redo { history.redo() } else { history.undo() }) else { return };
+        drop(history);
+        self.state.borrow_mut().tasks = tasks;
+        self.ui().set_offer_undo(false);
         self.refresh();
         self.schedule_save();
     }
@@ -389,8 +402,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui = AppWindow::new()?;
     let widget = WidgetWindow::new()?;
     let path = store::data_path();
+    let state = store::load(&path);
     let app = Rc::new(App {
-        state: RefCell::new(store::load(&path)),
+        history: RefCell::new(History::new(&state.tasks)),
+        state: RefCell::new(state),
         path,
         save_timer: Timer::default(),
         window: ui.as_weak(),
@@ -432,6 +447,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_delete_task(move |id| {
             a.state.borrow_mut().delete(id as u64);
             a.changed();
+            a.ui().set_offer_undo(true);
         });
     }
     {
@@ -476,7 +492,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_clear_done(on(|a| {
         a.state.borrow_mut().clear_done();
         a.changed();
+        a.ui().set_offer_undo(true);
     }));
+    ui.on_undo(on(|a| a.step_history(false)));
+    ui.on_redo(on(|a| a.step_history(true)));
     ui.on_show_done(on(|a| {
         a.state.borrow_mut().expand(Bucket::Done);
         a.changed();

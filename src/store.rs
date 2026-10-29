@@ -229,6 +229,49 @@ impl State {
     }
 }
 
+/// Undo and redo for the task list, kept as whole-list snapshots. Only the tasks
+/// are tracked, so collapsing a section or switching buckets is not a step.
+pub struct History {
+    last: Vec<Task>,
+    undo: Vec<Vec<Task>>,
+    redo: Vec<Vec<Task>>,
+}
+
+impl History {
+    const LIMIT: usize = 50;
+
+    pub fn new(tasks: &[Task]) -> Self {
+        History { last: tasks.to_vec(), undo: Vec::new(), redo: Vec::new() }
+    }
+
+    /// Notes the list after a change. Returns false when nothing actually changed.
+    pub fn record(&mut self, tasks: &[Task]) -> bool {
+        if tasks == self.last.as_slice() {
+            return false;
+        }
+        let before = std::mem::replace(&mut self.last, tasks.to_vec());
+        self.undo.push(before);
+        if self.undo.len() > Self::LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        true
+    }
+
+    /// The list as it was before the latest change, if there is one.
+    pub fn undo(&mut self) -> Option<Vec<Task>> {
+        let tasks = self.undo.pop()?;
+        self.redo.push(std::mem::replace(&mut self.last, tasks.clone()));
+        Some(tasks)
+    }
+
+    pub fn redo(&mut self) -> Option<Vec<Task>> {
+        let tasks = self.redo.pop()?;
+        self.undo.push(std::mem::replace(&mut self.last, tasks.clone()));
+        Some(tasks)
+    }
+}
+
 pub fn data_path() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     base.join("quick-planner").join("planner-tasks.json")
@@ -321,6 +364,49 @@ mod tests {
         assert_eq!(ids(&s, Bucket::Now), vec![2]);
         assert!(ids(&s, Bucket::Done).is_empty());
         assert_eq!(s.clear_done(), 0);
+    }
+
+    #[test]
+    fn history_undoes_and_redoes_changes() {
+        let mut s = state_with(1, Bucket::Now);
+        let mut h = History::new(&s.tasks);
+        assert!(!h.record(&s.tasks), "no change, no step");
+        s.add("b", Bucket::Now);
+        assert!(h.record(&s.tasks));
+        s.delete(1);
+        h.record(&s.tasks);
+
+        s.tasks = h.undo().unwrap(); // b is back with 1
+        assert_eq!(ids(&s, Bucket::Now), vec![2, 1]);
+        s.tasks = h.undo().unwrap();
+        assert_eq!(ids(&s, Bucket::Now), vec![1]);
+        assert!(h.undo().is_none());
+
+        s.tasks = h.redo().unwrap();
+        assert_eq!(ids(&s, Bucket::Now), vec![2, 1]);
+        // A new change drops what was left to redo.
+        s.toggle(2);
+        h.record(&s.tasks);
+        assert!(h.redo().is_none());
+        s.tasks = h.undo().unwrap();
+        assert_eq!(ids(&s, Bucket::Now), vec![2, 1]);
+    }
+
+    #[test]
+    fn history_keeps_the_last_fifty_steps() {
+        let mut s = State::default();
+        let mut h = History::new(&s.tasks);
+        for i in 0..60 {
+            s.add(&format!("t{i}"), Bucket::Now);
+            h.record(&s.tasks);
+        }
+        let mut steps = 0;
+        while let Some(tasks) = h.undo() {
+            s.tasks = tasks;
+            steps += 1;
+        }
+        assert_eq!(steps, 50);
+        assert_eq!(s.tasks.len(), 10);
     }
 
     #[test]
