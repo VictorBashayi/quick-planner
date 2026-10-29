@@ -594,19 +594,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     // The widget goes back where it was left, if that spot is still on a connected
-    // monitor; otherwise top-right of the primary monitor.
+    // monitor; otherwise top-right of the primary monitor. Slint only creates the native
+    // window once the event loop runs, so placing and pinning wait for it.
     widget.show()?;
     let saved = app.state.borrow().widget;
-    widget.window().with_winit_window(|w| {
-        if let Some([x, y, width, height]) = saved.filter(|&[x, y, ..]| on_screen(w, x + 40, y + 10)) {
+    let ww = widget.as_weak();
+    slint::spawn_local(async move {
+        let Some(widget) = ww.upgrade() else { return };
+        let Ok(w) = widget.window().winit_window().await else { return };
+        if let Some([x, y, width, height]) = saved.filter(|&[x, y, ..]| on_screen(&w, x + 40, y + 10)) {
             let _ = w.request_inner_size(winit::dpi::PhysicalSize::new(width as u32, height as u32));
             w.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
         } else if let Some(m) = w.primary_monitor() {
             let x = m.position().x + m.size().width as i32 - w.outer_size().width as i32 - 24;
             w.set_outer_position(winit::dpi::PhysicalPosition::new(x, m.position().y + 24));
         }
-    });
-    widget.window().with_winit_window(|w| hwnd(w).map(pin_to_desktop));
+        hwnd(&w).map(pin_to_desktop);
+    })?;
 
     // Re-check the wallpaper behind the widget now and then; it may move or the wallpaper change.
     let backdrop_timer = Timer::default();
