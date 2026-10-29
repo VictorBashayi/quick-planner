@@ -48,3 +48,11 @@ See [docs/design.md](docs/design.md) for behaviour, data format and visual desig
 ## Credits
 
 Young Serif font by [The Young Serif Project Authors](https://github.com/noirblancrouge/YoungSerif), under the SIL Open Font License (`ui/fonts/OFL.txt`).
+
+Built with [Slint](https://slint.dev), used under the Slint Royalty-free Desktop, Mobile, and Web Applications License.
+
+[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev)
+
+## Licence
+
+Quick Planner's own code is under the [MIT License](LICENSE). The font and Slint keep their own licences, as noted above.
