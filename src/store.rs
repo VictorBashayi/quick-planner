@@ -135,6 +135,13 @@ impl State {
         self.tasks.retain(|t| t.id != id);
     }
 
+    /// Deletes every task in Done and returns how many went.
+    pub fn clear_done(&mut self) -> usize {
+        let before = self.tasks.len();
+        self.tasks.retain(|t| t.bucket != Bucket::Done);
+        before - self.tasks.len()
+    }
+
     /// Moves a task into `bucket` so it ends up at position `index` among that
     /// bucket's tasks. `index` counts the task itself if it is already there, which
     /// is what the UI sees while dragging. Indexes past the end append.
@@ -303,6 +310,17 @@ mod tests {
         s.next_id = 1; // stale counter
         let id = s.add("b", Bucket::Now).unwrap();
         assert_eq!(id, 2);
+    }
+
+    #[test]
+    fn clear_done_removes_only_finished_tasks() {
+        let mut s = state_with(3, Bucket::Now); // now: 3,2,1
+        s.toggle(1);
+        s.toggle(3);
+        assert_eq!(s.clear_done(), 2);
+        assert_eq!(ids(&s, Bucket::Now), vec![2]);
+        assert!(ids(&s, Bucket::Done).is_empty());
+        assert_eq!(s.clear_done(), 0);
     }
 
     #[test]

@@ -473,6 +473,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    ui.on_clear_done(on(|a| {
+        a.state.borrow_mut().clear_done();
+        a.changed();
+    }));
     ui.on_show_done(on(|a| {
         a.state.borrow_mut().expand(Bucket::Done);
         a.changed();

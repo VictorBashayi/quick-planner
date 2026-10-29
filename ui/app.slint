@@ -499,6 +499,7 @@ export component AppWindow inherits Window {
     callback edit-cancelled(int, string, string);
     callback toggle-collapsed(string);
     callback show-done();
+    callback clear-done();
     callback hide-window();
     callback start-move();
     callback start-resize();
@@ -702,6 +703,25 @@ export component AppWindow inherits Window {
 
                             Rectangle { }
 
+                            // Two clicks to clear: the first arms it for 3 seconds.
+                            if bucket.key == "done" && bucket.tasks.length > 0: Text {
+                                text: root.clear-armed ? "Clear " + bucket.tasks.length + "?" : "Clear";
+                                font-size: 12px;
+                                color: root.clear-armed ? Palette.coffee : clear-ta.has-hover ? Palette.espresso : Palette.faint;
+                                vertical-alignment: center;
+                                clear-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        if (root.clear-armed) {
+                                            root.clear-armed = false;
+                                            root.clear-done();
+                                        } else {
+                                            root.clear-armed = true;
+                                        }
+                                    }
+                                }
+                            }
+
                             Text {
                                 text: bucket.tasks.length;
                                 font-size: 12px;
@@ -872,6 +892,15 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    property <bool> clear-armed;
+    Timer {
+        interval: 3s;
+        running: root.clear-armed;
+        triggered => {
+            root.clear-armed = false;
         }
     }
 
