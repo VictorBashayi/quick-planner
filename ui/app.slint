@@ -1,0 +1,1071 @@
+import "fonts/YoungSerif-Regular.ttf";
+
+export struct TaskItem {
+    id: int,
+    title: string,
+    desc: string,
+    done: bool,
+    // "Completed today" etc. for done tasks, empty otherwise.
+    when: string,
+}
+
+export struct BucketItem {
+    key: string,
+    title: string,
+    collapsed: bool,
+    empty-text: string,
+    tasks: [TaskItem],
+}
+
+struct MoveOption {
+    key: string,
+    title: string,
+}
+
+global Palette {
+    out property <color> porcelain: #FAF9F7;
+    out property <color> surface: #FFFFFF;
+    out property <color> espresso: #2E221B;
+    out property <color> coffee: #B0703A;
+    out property <color> crema: #EADBC8;
+    out property <color> foam: #F4EBE0;
+    out property <color> muted: #8C8079;
+    out property <color> faint: #B5ACA5;
+    out property <color> hairline: #ECE6DF;
+    out property <color> hover: #F3EEE8;
+    out property <color> danger: #B4442F;
+    out property <string> serif: "Young Serif";
+
+    // Coffee gets weaker the further away a bucket is in time.
+    public pure function strength(key: string) -> color {
+        if (key == "now") {
+            return #96532A;
+        }
+        if (key == "soon") {
+            return #B0703A;
+        }
+        if (key == "later") {
+            return #C49A74;
+        }
+        return #A79F98;
+    }
+}
+
+component Icon inherits Path {
+    width: 16px;
+    height: 16px;
+    viewbox-width: 16;
+    viewbox-height: 16;
+    fill: transparent;
+    stroke-width: 1.5px;
+    stroke-line-cap: round;
+}
+
+component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> active;
+    in property <color> hover-tint: Palette.espresso;
+    out property <bool> hovered: ta.has-hover;
+    callback clicked;
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: ta.has-hover ? Palette.hover : transparent;
+    Icon {
+        commands: root.icon;
+        stroke: root.active ? Palette.coffee : ta.has-hover ? root.hover-tint : Palette.muted;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component Check inherits Rectangle {
+    in property <bool> done;
+    in property <color> tint;
+    callback toggled;
+    width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    border-width: 1.5px;
+    border-color: root.done ? Palette.coffee : ta.has-hover ? Palette.coffee : root.tint;
+    background: root.done ? Palette.coffee : ta.has-hover ? Palette.foam : transparent;
+    if root.done || ta.has-hover: Icon {
+        width: 10px;
+        height: 10px;
+        commands: "M 3.5 8.5 L 6.5 11.5 L 12.5 4.5";
+        stroke: root.done ? Palette.surface : Palette.coffee;
+        stroke-width: 2px;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+component Editor inherits TextInput {
+    callback finished;
+    callback cancelled;
+    callback enter-pressed;
+    single-line: false;
+    wrap: word-wrap;
+    color: Palette.espresso;
+    selection-background-color: Palette.crema;
+    selection-foreground-color: Palette.espresso;
+    key-pressed(event) => {
+        if (event.text == Key.Escape) {
+            root.cancelled();
+            return accept;
+        }
+        if (event.text == Key.Return && !event.modifiers.shift) {
+            root.enter-pressed();
+            return accept;
+        }
+        reject
+    }
+    changed has-focus => {
+        if (!self.has-focus) {
+            root.finished();
+        }
+    }
+}
+
+component TaskRow inherits Rectangle {
+    in property <TaskItem> task;
+    in property <string> bucket-key;
+    in property <int> index;
+    in property <bool> drag-active;
+    in property <length> drag-y;
+    in property <bool> lifted;
+    in property <bool> drop-line;
+
+    callback toggled(int);
+    callback deleted(int);
+    callback moved(int, string);
+    callback edit-live(int, bool, string);
+    callback edit-finished();
+    callback edit-cancelled(int, string, string);
+    callback drag-start(int, string, length, length, length);
+    callback drag-move(length, length);
+    callback drag-end();
+    callback drag-cancelled();
+    callback hover-drop(int);
+
+    property <bool> editing-title;
+    property <bool> editing-desc;
+    property <bool> editing: editing-title || editing-desc;
+    property <bool> drag-started;
+    property <bool> active: row-ta.has-hover || move-btn.hovered || del-btn.hovered || editing;
+    property <length> top: self.absolute-position.y;
+    property <int> zone: !root.drag-active ? 0
+        : root.drag-y >= root.top && root.drag-y < root.top + root.height / 2 ? 1
+        : root.drag-y >= root.top + root.height / 2 && root.drag-y < root.top + root.height ? 2 : 0;
+    changed zone => {
+        if (root.zone == 1) {
+            root.hover-drop(root.index);
+        } else if (root.zone == 2) {
+            root.hover-drop(root.index + 1);
+        }
+    }
+
+    border-radius: 8px;
+    background: root.active && !root.lifted ? Palette.hover : transparent;
+    opacity: root.lifted ? 0.35 : 1;
+
+    row-ta := TouchArea {
+        mouse-cursor: root.drag-started ? grabbing : default;
+        moved => {
+            if (self.pressed && !root.drag-started && !root.editing
+                    && abs(self.mouse-x - self.pressed-x) + abs(self.mouse-y - self.pressed-y) > 5px) {
+                root.drag-started = true;
+                root.drag-start(root.task.id, root.task.title, self.pressed-x, self.pressed-y, root.width);
+            }
+            if (root.drag-started) {
+                root.drag-move(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.up && root.drag-started) {
+                root.drag-started = false;
+                root.drag-end();
+            }
+            // The list's Flickable steals quick flicks mid-drag; we then get cancel, never up.
+            if (event.kind == PointerEventKind.cancel && root.drag-started) {
+                root.drag-started = false;
+                root.drag-cancelled();
+            }
+        }
+        clicked => {
+            if (root.drag-started || root.editing) {
+                return;
+            }
+            if (self.mouse-y > 8px + title-slot.y + title-slot.height && root.task.desc != "") {
+                root.editing-desc = true;
+                desc-editor.focus();
+            } else {
+                root.editing-title = true;
+                title-editor.focus();
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 6px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 10px;
+
+        VerticalLayout {
+            alignment: start;
+            padding-top: 1px;
+            Check {
+                done: root.task.done;
+                tint: Palette.strength(root.bucket-key);
+                toggled => {
+                    root.toggled(root.task.id);
+                }
+            }
+        }
+
+        VerticalLayout {
+            spacing: 2px;
+            alignment: center;
+
+            title-slot := Rectangle {
+                min-height: 20px;
+                if !root.editing-title: Text {
+                    width: 100%;
+                    text: root.task.title;
+                    // Single line keeps row heights exact; wrapped text throws off the list's scroll height.
+                    overflow: elide;
+                    font-size: 13.5px;
+                    color: root.task.done ? Palette.muted : Palette.espresso;
+                    vertical-alignment: center;
+                }
+                title-editor := Editor {
+                    visible: root.editing-title;
+                    enabled: root.editing-title;
+                    width: 100%;
+                    text: root.task.title;
+                    font-size: 13.5px;
+                    edited => {
+                        root.edit-live(root.task.id, false, self.text);
+                    }
+                    enter-pressed => {
+                        if (root.task.desc == "") {
+                            root.editing-desc = true;
+                            desc-editor.focus();
+                            root.editing-title = false;
+                        } else {
+                            root.editing-title = false;
+                            root.edit-finished();
+                        }
+                    }
+                    cancelled => {
+                        root.editing-title = false;
+                        root.edit-cancelled(root.task.id, root.task.title, root.task.desc);
+                    }
+                    finished => {
+                        if (root.editing-title) {
+                            root.editing-title = false;
+                            if (!root.editing-desc) {
+                                root.edit-finished();
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.task.desc != "" && !root.editing-desc: Text {
+                text: root.task.desc;
+                overflow: elide;
+                font-size: 12px;
+                color: Palette.muted;
+            }
+            desc-editor := Editor {
+                visible: root.editing-desc;
+                enabled: root.editing-desc;
+                height: root.editing-desc ? self.preferred-height : 0px;
+                text: root.task.desc;
+                font-size: 12px;
+                color: Palette.muted;
+                edited => {
+                    root.edit-live(root.task.id, true, self.text);
+                }
+                enter-pressed => {
+                    root.editing-desc = false;
+                    root.edit-finished();
+                }
+                cancelled => {
+                    root.editing-desc = false;
+                    root.edit-cancelled(root.task.id, root.task.title, root.task.desc);
+                }
+                finished => {
+                    if (root.editing-desc) {
+                        root.editing-desc = false;
+                        root.edit-finished();
+                    }
+                }
+                if self.text == "" && root.editing-desc: Text {
+                    text: "Add a note";
+                    font-size: 12px;
+                    color: Palette.faint;
+                }
+            }
+
+            if root.task.when != "": Text {
+                text: root.task.when;
+                overflow: elide;
+                font-size: 11px;
+                color: Palette.faint;
+            }
+        }
+
+        HorizontalLayout {
+            alignment: start;
+            spacing: 0px;
+            opacity: root.active && !root.lifted ? 1 : 0;
+            move-btn := IconButton {
+                icon: "M 3.5 8 L 3.6 8 M 8 8 L 8.1 8 M 12.5 8 L 12.6 8";
+                clicked => {
+                    menu.show();
+                }
+            }
+            del-btn := IconButton {
+                icon: "M 4.5 4.5 L 11.5 11.5 M 11.5 4.5 L 4.5 11.5";
+                hover-tint: Palette.danger;
+                clicked => {
+                    root.deleted(root.task.id);
+                }
+            }
+        }
+    }
+
+    if root.drop-line: Rectangle {
+        x: 8px;
+        y: -1px;
+        width: parent.width - 16px;
+        height: 2px;
+        border-radius: 1px;
+        background: Palette.coffee;
+    }
+
+    menu := PopupWindow {
+        x: root.width - 150px;
+        y: 36px;
+        width: 140px;
+        Rectangle {
+            background: Palette.surface;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Palette.hairline;
+            drop-shadow-blur: 18px;
+            drop-shadow-offset-y: 6px;
+            drop-shadow-color: #2E221B26;
+            VerticalLayout {
+                padding: 4px;
+                Text {
+                    text: "Move to";
+                    font-size: 11px;
+                    color: Palette.faint;
+                    height: 24px;
+                    vertical-alignment: center;
+                    x: 10px;
+                }
+                for opt in [
+                    { key: "now", title: "Today" },
+                    { key: "soon", title: "This week" },
+                    { key: "later", title: "Someday" },
+                    { key: "done", title: "Done" },
+                ]: VerticalLayout {
+                    if opt.key != root.bucket-key: Rectangle {
+                        height: 30px;
+                        border-radius: 6px;
+                        background: opt-ta.has-hover ? Palette.hover : transparent;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            spacing: 9px;
+                            alignment: start;
+                            Rectangle {
+                                y: (parent.height - 8px) / 2;
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: Palette.strength(opt.key);
+                            }
+                            Text {
+                                text: opt.title;
+                                font-size: 12.5px;
+                                color: Palette.espresso;
+                                vertical-alignment: center;
+                            }
+                        }
+                        opt-ta := TouchArea {
+                            clicked => {
+                                root.moved(root.task.id, opt.key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A strip of a bucket that accepts drops at a fixed index.
+component DropZone inherits Rectangle {
+    in property <bool> drag-active;
+    in property <length> drag-y;
+    in property <int> drop-index;
+    callback hover-drop(int);
+    property <bool> over: root.drag-active && root.drag-y >= self.absolute-position.y
+        && root.drag-y < self.absolute-position.y + self.height;
+    changed over => {
+        if (root.over) {
+            root.hover-drop(root.drop-index);
+        }
+    }
+}
+
+component Chip inherits Rectangle {
+    in property <string> label;
+    in property <string> key;
+    in property <bool> selected;
+    callback clicked;
+    height: 26px;
+    border-radius: 13px;
+    background: root.selected ? Palette.foam : ta.has-hover ? Palette.hover : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 11px;
+        spacing: 7px;
+        Rectangle {
+            y: (parent.height - 7px) / 2;
+            width: 7px;
+            height: 7px;
+            border-radius: 3.5px;
+            background: Palette.strength(root.key);
+            opacity: root.selected ? 1 : 0.55;
+        }
+        Text {
+            text: root.label;
+            font-size: 12px;
+            vertical-alignment: center;
+            color: root.selected ? Palette.espresso : Palette.muted;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Quick Planner";
+    no-frame: true;
+    always-on-top: root.pinned;
+    preferred-width: 400px;
+    preferred-height: 640px;
+    min-width: 320px;
+    min-height: 360px;
+    background: Palette.porcelain;
+    default-font-family: "Segoe UI Variable Text";
+    default-font-size: 13px;
+
+    in property <[BucketItem]> buckets;
+    in property <int> selected: 0;
+    in property <string> status;
+    in property <bool> has-done;
+    in property <string> today;
+    in-out property <bool> pinned: true;
+
+    callback add-task(string);
+    callback select-bucket(int);
+    callback toggle-task(int);
+    callback delete-task(int);
+    callback move-task(int, string, int);
+    callback edit-live(int, bool, string);
+    callback edit-finished();
+    callback edit-cancelled(int, string, string);
+    callback toggle-collapsed(string);
+    callback show-done();
+    callback hide-window();
+    callback start-move();
+    callback start-resize();
+    callback toggle-requested();
+    callback show-requested();
+    callback quit-requested();
+
+    // Drag state. Positions are window coordinates.
+    property <int> drag-id: -1;
+    property <bool> dragging: root.drag-id >= 0;
+    property <string> drag-title;
+    property <length> drag-x;
+    property <length> drag-y;
+    property <length> grab-x;
+    property <length> grab-y;
+    property <length> ghost-width;
+    property <string> drop-bucket;
+    property <int> drop-index: -1;
+    property <length> list-top: list.absolute-position.y;
+    property <bool> drag-in-list: root.dragging && root.drag-y >= root.list-top && root.drag-y < root.list-top + list.height;
+
+    public function focus-input() {
+        add-input.focus();
+    }
+
+    function set-drop(key: string, index: int) {
+        root.drop-bucket = key;
+        root.drop-index = index;
+    }
+
+    VerticalLayout {
+        // Title bar
+        Rectangle {
+            height: 48px;
+            TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.start-move();
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 10px;
+                padding-top: 10px;
+                spacing: 2px;
+                Text {
+                    text: root.today;
+                    font-family: Palette.serif;
+                    font-size: 15px;
+                    color: Palette.espresso;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { }
+
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        active: root.pinned;
+                        icon: "M 6 2.5 L 10 2.5 M 6.8 2.5 L 6.3 7 L 4.5 9 L 11.5 9 L 9.7 7 L 9.2 2.5 M 8 9 L 8 13.5";
+                        clicked => {
+                            root.pinned = !root.pinned;
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        icon: "M 4 8 L 12 8";
+                        clicked => {
+                            root.hide-window();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Quick add
+        VerticalLayout {
+            padding-left: 16px;
+            padding-right: 16px;
+            padding-top: 8px;
+            padding-bottom: 6px;
+            spacing: 10px;
+
+            Rectangle {
+                height: 42px;
+                border-radius: 10px;
+                background: Palette.surface;
+                border-width: 1px;
+                border-color: add-input.has-focus ? Palette.coffee : Palette.hairline;
+
+                add-input := TextInput {
+                    x: 14px;
+                    width: parent.width - 28px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    font-size: 14px;
+                    color: Palette.espresso;
+                    selection-background-color: Palette.crema;
+                    selection-foreground-color: Palette.espresso;
+                    accepted => {
+                        if (self.text != "") {
+                            root.add-task(self.text);
+                            self.text = "";
+                        }
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.hide-window();
+                            return accept;
+                        }
+                        if (event.modifiers.control && event.text == "1") {
+                            root.select-bucket(0);
+                            return accept;
+                        }
+                        if (event.modifiers.control && event.text == "2") {
+                            root.select-bucket(1);
+                            return accept;
+                        }
+                        if (event.modifiers.control && event.text == "3") {
+                            root.select-bucket(2);
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+
+                if add-input.text == "": Text {
+                    x: 14px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: "Add a task";
+                    font-size: 14px;
+                    color: Palette.faint;
+                }
+            }
+
+            HorizontalLayout {
+                alignment: start;
+                spacing: 4px;
+                for chip[i] in [
+                    { key: "now", title: "Today" },
+                    { key: "soon", title: "This week" },
+                    { key: "later", title: "Someday" },
+                ]: Chip {
+                    label: chip.title;
+                    key: chip.key;
+                    selected: i == root.selected;
+                    clicked => {
+                        root.select-bucket(i);
+                        add-input.focus();
+                    }
+                }
+            }
+        }
+
+        // Buckets
+        list := Flickable {
+            content-height: column.preferred-height;
+            column := VerticalLayout {
+                width: list.width;
+                padding-left: 10px;
+                padding-right: 10px;
+                padding-bottom: 12px;
+
+                for bucket in root.buckets: VerticalLayout {
+                    header := Rectangle {
+                        height: 46px;
+                        DropZone {
+                            drag-active: root.drag-in-list;
+                            drag-y: root.drag-y;
+                            drop-index: 0;
+                            hover-drop(i) => {
+                                root.set-drop(bucket.key, i);
+                            }
+                        }
+
+                        header-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.toggle-collapsed(bucket.key);
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 12px;
+                            padding-top: 12px;
+                            spacing: 8px;
+                            Text {
+                                text: bucket.title;
+                                font-family: Palette.serif;
+                                font-size: 19px;
+                                color: Palette.strength(bucket.key);
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle { }
+
+                            Text {
+                                text: bucket.tasks.length;
+                                font-size: 12px;
+                                color: Palette.faint;
+                                vertical-alignment: center;
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                Icon {
+                                    width: 12px;
+                                    height: 12px;
+                                    commands: bucket.collapsed ? "M 6 3.5 L 10.5 8 L 6 12.5" : "M 3.5 6 L 8 10.5 L 12.5 6";
+                                    stroke: header-ta.has-hover ? Palette.espresso : Palette.faint;
+                                }
+                            }
+                        }
+
+                        if root.dragging && root.drop-bucket == bucket.key && bucket.collapsed: Rectangle {
+                            x: 18px;
+                            y: parent.height - 3px;
+                            width: parent.width - 36px;
+                            height: 2px;
+                            background: Palette.coffee;
+                        }
+                    }
+
+                    if !bucket.collapsed: VerticalLayout {
+                        for task[i] in bucket.tasks: TaskRow {
+                            task: task;
+                            bucket-key: bucket.key;
+                            index: i;
+                            drag-active: root.drag-in-list;
+                            drag-y: root.drag-y;
+                            lifted: root.drag-id == task.id;
+                            drop-line: root.dragging && root.drop-bucket == bucket.key && root.drop-index == i;
+                            toggled(id) => {
+                                root.toggle-task(id);
+                            }
+                            deleted(id) => {
+                                root.delete-task(id);
+                            }
+                            moved(id, key) => {
+                                root.move-task(id, key, 0);
+                            }
+                            edit-live(id, is-desc, text) => {
+                                root.edit-live(id, is-desc, text);
+                            }
+                            edit-finished => {
+                                root.edit-finished();
+                            }
+                            edit-cancelled(id, title, desc) => {
+                                root.edit-cancelled(id, title, desc);
+                            }
+                            hover-drop(index) => {
+                                root.set-drop(bucket.key, index);
+                            }
+                            drag-start(id, title, gx, gy, w) => {
+                                root.drag-title = title;
+                                root.grab-x = gx;
+                                root.grab-y = gy;
+                                root.ghost-width = w;
+                                root.drop-bucket = "";
+                                root.drop-index = -1;
+                                root.drag-id = id;
+                            }
+                            drag-move(x, y) => {
+                                root.drag-x = x;
+                                root.drag-y = y;
+                            }
+                            drag-end => {
+                                if (root.drag-in-list && root.drop-bucket != "") {
+                                    root.move-task(root.drag-id, root.drop-bucket, root.drop-index);
+                                }
+                                root.drag-id = -1;
+                            }
+                            drag-cancelled => {
+                                root.drag-id = -1;
+                            }
+                        }
+
+                        DropZone {
+                            height: bucket.tasks.length == 0 ? 36px : 10px;
+                            drag-active: root.drag-in-list;
+                            drag-y: root.drag-y;
+                            drop-index: bucket.tasks.length;
+                            hover-drop(i) => {
+                                root.set-drop(bucket.key, i);
+                            }
+                            if bucket.tasks.length == 0: Text {
+                                x: 38px;
+                                y: 4px;
+                                text: bucket.empty-text;
+                                font-size: 12.5px;
+                                color: Palette.faint;
+                            }
+                            if root.dragging && root.drop-bucket == bucket.key && root.drop-index == bucket.tasks.length
+                                && bucket.tasks.length > 0: Rectangle {
+                                x: 8px;
+                                y: 0px;
+                                width: parent.width - 16px;
+                                height: 2px;
+                                background: Palette.coffee;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Status
+        Rectangle {
+            height: 36px;
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Palette.hairline;
+            }
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 26px;
+                Text {
+                    text: root.status;
+                    font-size: 11.5px;
+                    color: status-ta.has-hover ? Palette.espresso : Palette.muted;
+                    vertical-alignment: center;
+                    // Opens Done and scrolls to it; Done is the last bucket, so that's the bottom.
+                    status-ta := TouchArea {
+                        enabled: root.has-done;
+                        mouse-cursor: root.has-done ? pointer : default;
+                        clicked => {
+                            root.show-done();
+                            root.revealing-done = true;
+                        }
+                    }
+                }
+
+                Rectangle { }
+
+                Text {
+                    text: "Alt+P shows and hides";
+                    font-size: 11.5px;
+                    color: Palette.faint;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Resize grip
+            Rectangle {
+                x: parent.width - 18px;
+                y: parent.height - 18px;
+                width: 16px;
+                height: 16px;
+                Icon {
+                    width: 10px;
+                    height: 10px;
+                    commands: "M 14 6 L 6 14 M 14 11 L 11 14";
+                    stroke: grip.has-hover ? Palette.muted : Palette.faint;
+                    stroke-width: 1.2px;
+                }
+                grip := TouchArea {
+                    mouse-cursor: nwse-resize;
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            root.start-resize();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Scroll to the bottom once the newly expanded Done rows are laid out; scrolling in the
+    // click handler itself would use the list's height from before they existed.
+    property <bool> revealing-done;
+    Timer {
+        interval: 30ms;
+        running: root.revealing-done;
+        triggered => {
+            root.revealing-done = false;
+            list.content-y = min(0px, list.height - list.content-height);
+        }
+    }
+
+    // Scroll the list while dragging near its edges.
+    Timer {
+        interval: 16ms;
+        running: root.dragging && (root.drag-y < root.list-top + 28px || root.drag-y > root.list-top + list.height - 28px);
+        triggered => {
+            if (root.drag-y < root.list-top + 28px) {
+                list.content-y = min(0px, list.content-y + 7px);
+            } else {
+                list.content-y = max(min(0px, list.height - list.content-height), list.content-y - 7px);
+            }
+        }
+    }
+
+    // The task being dragged.
+    if root.dragging: Rectangle {
+        x: root.drag-x - root.grab-x;
+        y: root.drag-y - root.grab-y;
+        width: root.ghost-width;
+        height: 38px;
+        border-radius: 8px;
+        background: Palette.surface;
+        border-width: 1px;
+        border-color: Palette.crema;
+        drop-shadow-blur: 20px;
+        drop-shadow-offset-y: 8px;
+        drop-shadow-color: #2E221B2E;
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 12px;
+            spacing: 10px;
+            Rectangle {
+                y: (parent.height - 18px) / 2;
+                width: 18px;
+                height: 18px;
+                border-radius: 9px;
+                border-width: 1.5px;
+                border-color: Palette.coffee;
+            }
+            Text {
+                text: root.drag-title;
+                font-size: 13.5px;
+                color: Palette.espresso;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// Text with a 1px shadow in the opposite tone, so it reads on any wallpaper.
+// The root draws the shadow; the child draws the ink 1px up-left of it.
+component InkText inherits Text {
+    in property <bool> dark-bg;
+    in property <color> ink: root.dark-bg ? #FFFFFF : Palette.espresso;
+    color: root.dark-bg ? #000000a0 : #FFFFFFc0;
+    Text {
+        x: -1px;
+        y: -1px;
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        font-family: root.font-family;
+        font-size: root.font-size;
+        horizontal-alignment: root.horizontal-alignment;
+        vertical-alignment: root.vertical-alignment;
+        overflow: root.overflow;
+        color: root.ink;
+    }
+}
+
+// Transparent desktop card: today's open tasks, tick to complete.
+export component WidgetWindow inherits Window {
+    title: "Quick Planner widget";
+    no-frame: true;
+    background: transparent;
+    default-font-family: "Segoe UI Variable Text";
+    default-font-size: 13px;
+    preferred-width: 260px;
+    min-width: 180px;
+
+    in property <[TaskItem]> tasks;
+    in property <string> today;
+    in property <string> more;
+    // Set from Rust after sampling the wallpaper behind the widget.
+    in property <bool> dark-bg;
+
+    callback toggle-task(int);
+    callback open-app();
+    callback start-move();
+    callback start-resize();
+
+    // Resize grip, larger than the main window's so it is easy to catch.
+    Rectangle {
+        x: parent.width - 24px;
+        y: parent.height - 24px;
+        width: 24px;
+        height: 24px;
+        Icon {
+            width: 12px;
+            height: 12px;
+            commands: "M 14 6 L 6 14 M 14 11 L 11 14";
+            stroke: root.dark-bg ? #FFFFFF : Palette.espresso;
+            stroke-width: 1.4px;
+            opacity: grip.has-hover ? 0.9 : 0.4;
+        }
+        grip := TouchArea {
+            mouse-cursor: nwse-resize;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                    root.start-resize();
+                }
+            }
+        }
+    }
+
+    VerticalLayout {
+        padding: 14px;
+        spacing: 9px;
+        Rectangle {
+            height: 22px;
+            HorizontalLayout {
+                spacing: 8px;
+                InkText {
+                    text: "Today";
+                    font-family: Palette.serif;
+                    font-size: 16px;
+                    dark-bg: root.dark-bg;
+                    ink: root.dark-bg ? #E8C9A6 : Palette.strength("now");
+                }
+
+                InkText {
+                    text: root.today;
+                    font-size: 11px;
+                    dark-bg: root.dark-bg;
+                    horizontal-stretch: 1;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            TouchArea {
+                double-clicked => {
+                    root.open-app();
+                }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.start-move();
+                    }
+                }
+            }
+        }
+
+        if root.tasks.length == 0: InkText {
+            text: "Nothing for today.";
+            dark-bg: root.dark-bg;
+        }
+        for t in root.tasks: HorizontalLayout {
+            spacing: 10px;
+            Check {
+                tint: root.dark-bg ? #FFFFFFc0 : Palette.muted;
+                toggled => {
+                    root.toggle-task(t.id);
+                }
+            }
+
+            InkText {
+                text: t.title;
+                dark-bg: root.dark-bg;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+        if root.more != "": InkText {
+            text: root.more;
+            font-size: 11px;
+            dark-bg: root.dark-bg;
+        }
+        // Every row above has a fixed height; this spacer lets the window grow taller.
+        Rectangle { }
+    }
+}
