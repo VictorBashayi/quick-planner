@@ -5,8 +5,11 @@ export struct TaskItem {
     title: string,
     desc: string,
     done: bool,
-    // "Completed today" etc. for done tasks, empty otherwise.
+    // "Completed today" for done tasks, "Due Sat 7 Nov" for open ones with a due date.
     when: string,
+    overdue: bool,
+    // Within the hour before its due time.
+    soon: bool,
 }
 
 export struct BucketItem {
@@ -326,7 +329,7 @@ component TaskRow inherits Rectangle {
                 text: root.task.when;
                 overflow: elide;
                 font-size: 11px;
-                color: Palette.faint;
+                color: root.task.overdue ? Palette.danger : root.task.soon ? Palette.coffee : Palette.faint;
             }
         }
 
@@ -507,6 +510,8 @@ export component AppWindow inherits Window {
     callback undo();
     callback redo();
     callback search(string);
+    // What the trailing date words of the typed text mean ("Due tomorrow, 3:00 pm"), or "".
+    pure callback due-preview(string) -> string;
     callback hide-window();
     callback start-move();
     callback start-resize();
@@ -723,21 +728,34 @@ export component AppWindow inherits Window {
                 }
             }
 
+            // Bucket chips, with the due-date preview filling the rest of the row.
             HorizontalLayout {
-                alignment: start;
-                spacing: 4px;
-                for chip[i] in [
-                    { key: "now", title: "Today" },
-                    { key: "soon", title: "This week" },
-                    { key: "later", title: "Someday" },
-                ]: Chip {
-                    label: chip.title;
-                    key: chip.key;
-                    selected: i == root.selected;
-                    clicked => {
-                        root.select-bucket(i);
-                        add-input.focus();
+                HorizontalLayout {
+                    horizontal-stretch: 0;
+                    spacing: 4px;
+                    for chip[i] in [
+                        { key: "now", title: "Today" },
+                        { key: "soon", title: "This week" },
+                        { key: "later", title: "Someday" },
+                    ]: Chip {
+                        label: chip.title;
+                        key: chip.key;
+                        selected: i == root.selected;
+                        clicked => {
+                            root.select-bucket(i);
+                            add-input.focus();
+                        }
                     }
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.searching ? "" : root.due-preview(add-input.text);
+                    font-size: 11.5px;
+                    color: Palette.coffee;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                    overflow: elide;
                 }
             }
         }
@@ -1113,10 +1131,12 @@ export component WidgetWindow inherits Window {
     default-font-size: 13px;
     preferred-width: 260px;
     min-width: 180px;
+    // Six rows to start with; resizing shows more or fewer.
+    preferred-height: 222px;
+    min-height: 90px;
 
     in property <[TaskItem]> tasks;
     in property <string> today;
-    in property <string> more;
     // Set from Rust after sampling the wallpaper behind the widget.
     in property <bool> dark-bg;
 
@@ -1187,32 +1207,56 @@ export component WidgetWindow inherits Window {
             }
         }
 
-        if root.tasks.length == 0: InkText {
-            text: "Nothing for today.";
-            dark-bg: root.dark-bg;
-        }
-        for t in root.tasks: HorizontalLayout {
-            spacing: 10px;
-            Check {
-                tint: root.dark-bg ? #FFFFFFc0 : Palette.muted;
-                toggled => {
-                    root.toggle-task(t.id);
+        // Rows are placed by hand rather than in a layout, so how many fit can follow the
+        // window's height without the content's size feeding back into it.
+        rows := Rectangle {
+            property <length> row-h: 27px;
+            property <int> shown: root.tasks.length * self.row-h <= self.height ? root.tasks.length
+                : max(0, floor((self.height - 18px) / self.row-h));
+
+            if root.tasks.length == 0: InkText {
+                y: 0;
+                height: 18px;
+                text: "Nothing for today.";
+                dark-bg: root.dark-bg;
+            }
+            for t[i] in root.tasks: HorizontalLayout {
+                y: i * rows.row-h;
+                height: 18px;
+                visible: i < rows.shown;
+                spacing: 10px;
+                Check {
+                    tint: root.dark-bg ? #FFFFFFc0 : Palette.muted;
+                    toggled => {
+                        root.toggle-task(t.id);
+                    }
+                }
+
+                InkText {
+                    text: t.title;
+                    dark-bg: root.dark-bg;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                if t.when != "": InkText {
+                    text: t.when;
+                    font-size: 11px;
+                    dark-bg: root.dark-bg;
+                    ink: t.overdue ? (root.dark-bg ? #F2A48F : Palette.danger)
+                        : t.soon ? (root.dark-bg ? #E8C9A6 : Palette.coffee)
+                        : (root.dark-bg ? #FFFFFF : Palette.espresso);
+                    vertical-alignment: center;
                 }
             }
-
-            InkText {
-                text: t.title;
+            if rows.shown < root.tasks.length: InkText {
+                y: rows.shown * rows.row-h;
+                height: 18px;
+                text: "+" + (root.tasks.length - rows.shown) + " more";
+                font-size: 11px;
                 dark-bg: root.dark-bg;
-                overflow: elide;
-                vertical-alignment: center;
             }
         }
-        if root.more != "": InkText {
-            text: root.more;
-            font-size: 11px;
-            dark-bg: root.dark-bg;
-        }
-        // Every row above has a fixed height; this spacer lets the window grow taller.
-        Rectangle { }
     }
 }

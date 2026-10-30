@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod due;
 mod icon;
 mod store;
 
@@ -11,6 +12,7 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
+use due::{DAYS, MONTHS};
 use store::{Bucket, History, State};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -28,6 +30,10 @@ struct App {
     placed: Cell<bool>,
     /// Live search text; session only.
     query: RefCell<String>,
+    /// The date at the last clock check, to spot midnight.
+    day: Cell<Option<due::Date>>,
+    /// How urgent each due task was at the last refresh, to spot labels going stale.
+    urgencies: RefCell<Vec<(u64, due::Urgency)>>,
 }
 
 impl App {
@@ -54,6 +60,20 @@ impl App {
         self.schedule_save();
     }
 
+    /// Runs at launch and on the 5 s tick. On a new day, moves tasks whose date has come
+    /// closer up a bucket. Redraws when the day changes or a task turns due soon or overdue,
+    /// and not otherwise, since a redraw ends any edit in progress.
+    fn check_clock(self: &Rc<Self>) {
+        let (today, minute) = now_local();
+        let new_day = self.day.replace(Some(today)) != Some(today);
+        if new_day && self.state.borrow_mut().roll_over(today) {
+            return self.changed();
+        }
+        if new_day || urgencies(&self.state.borrow(), today, minute) != *self.urgencies.borrow() {
+            self.refresh();
+        }
+    }
+
     fn schedule_save(self: &Rc<Self>) {
         let app = Rc::downgrade(self);
         self.save_timer.start(TimerMode::SingleShot, Duration::from_millis(300), move || {
@@ -75,6 +95,7 @@ impl App {
         let state = self.state.borrow();
         let now = store::now_ms();
         let days = local_day(now).zip(local_day(now - 86_400_000));
+        let (date, minute) = now_local();
         let query = self.query.borrow();
         let filtering = !query.is_empty();
         let buckets: Vec<BucketItem> = Bucket::ALL
@@ -92,8 +113,13 @@ impl App {
                             (Some(d), Some((today, yesterday))) if t.completed => {
                                 completed_label(d, today, yesterday).into()
                             }
+                            _ if !t.completed => {
+                                t.due().map(|d| due::label(d, date, minute)).unwrap_or_default().into()
+                            }
                             _ => SharedString::new(),
                         },
+                        overdue: urgency(t, date, minute) == Some(due::Urgency::Overdue),
+                        soon: urgency(t, date, minute) == Some(due::Urgency::Soon),
                     })
                     .collect();
                 // While searching, buckets without matches are hidden and the rest shown open.
@@ -118,21 +144,24 @@ impl App {
         ui.set_status(status_text(state.counts()).into());
         ui.set_has_done(state.counts().1 > 0);
 
-        // The widget shows today's open tasks only, capped so it never needs scrolling.
-        const WIDGET_MAX: usize = 6;
-        let open: Vec<_> = state.tasks_in(Bucket::Now).filter(|t| !t.completed).collect();
+        // The widget shows today's open tasks, as many as fit its height.
         let w = self.widget.upgrade().expect("widget outlives app state");
         w.set_tasks(ModelRc::new(VecModel::from(
-            open.iter()
-                .take(WIDGET_MAX)
-                .map(|t| TaskItem { id: t.id as i32, title: t.text.as_str().into(), ..Default::default() })
+            state
+                .tasks_in(Bucket::Now)
+                .filter(|t| !t.completed)
+                .map(|t| TaskItem {
+                    id: t.id as i32,
+                    title: t.text.as_str().into(),
+                    when: t.due().map(|d| due::short_label(d, date, minute)).unwrap_or_default().into(),
+                    overdue: urgency(t, date, minute) == Some(due::Urgency::Overdue),
+                    soon: urgency(t, date, minute) == Some(due::Urgency::Soon),
+                    ..Default::default()
+                })
                 .collect::<Vec<_>>(),
         )));
-        w.set_more(match open.len().saturating_sub(WIDGET_MAX) {
-            0 => SharedString::new(),
-            n => format!("+{n} more").into(),
-        });
         w.set_today(today().into());
+        *self.urgencies.borrow_mut() = urgencies(&state, date, minute);
     }
 
     fn show(&self) {
@@ -182,6 +211,15 @@ impl App {
     }
 }
 
+/// How urgent an open task's due date is; `None` for done tasks and tasks without one.
+fn urgency(t: &store::Task, today: due::Date, minute: u32) -> Option<due::Urgency> {
+    t.due().filter(|_| !t.completed).map(|d| d.urgency(today, minute))
+}
+
+fn urgencies(state: &State, today: due::Date, minute: u32) -> Vec<(u64, due::Urgency)> {
+    state.tasks.iter().filter_map(|t| Some((t.id, urgency(t, today, minute)?))).collect()
+}
+
 fn bucket_title(b: Bucket) -> &'static str {
     match b {
         Bucket::Now => "Today",
@@ -208,12 +246,6 @@ fn status_text((open, done): (usize, usize)) -> String {
         (o, d) => format!("{o} open, {d} done"),
     }
 }
-
-const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const MONTHS: [&str; 12] = [
-    "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
-    "November", "December",
-];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Day {
@@ -275,6 +307,19 @@ fn today() -> String {
         t.wDay,
         MONTHS[(t.wMonth as usize).saturating_sub(1) % 12]
     )
+}
+
+/// Today's local date and the minutes since local midnight.
+fn now_local() -> (due::Date, u32) {
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+    // SAFETY: GetLocalTime only writes the struct it is given.
+    let t = unsafe {
+        let mut t = std::mem::zeroed();
+        GetLocalTime(&mut t);
+        t
+    };
+    let date = due::Date { year: t.wYear as i32, month: t.wMonth as u32, day: t.wDay as u32 };
+    (date, t.wHour as u32 * 60 + t.wMinute as u32)
 }
 
 fn hwnd(w: &winit::window::Window) -> Option<windows_sys::Win32::Foundation::HWND> {
@@ -422,6 +467,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         visible: Cell::new(false),
         placed: Cell::new(false),
         query: RefCell::new(String::new()),
+        day: Cell::new(None),
+        urgencies: RefCell::new(Vec::new()),
     });
     app.refresh();
 
@@ -432,11 +479,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let a = app.clone();
         ui.on_add_task(move |text| {
-            let b = a.state.borrow().selected_bucket;
-            a.state.borrow_mut().add(&text, b);
+            let (today, _) = now_local();
+            let (title, due) = due::split(&text, today);
+            let mut s = a.state.borrow_mut();
+            let b = s.selected_bucket;
+            if let Some(id) = s.add(title, b) {
+                s.set_due(id, due, today);
+            }
+            drop(s);
             a.changed();
         });
     }
+    ui.on_due_preview(|text| {
+        let (today, minute) = now_local();
+        let Some(d) = due::split(&text, today).1 else { return SharedString::new() };
+        format!("{} → {}", due::label(d, today, minute), bucket_title(Bucket::for_due(d.date, today))).into()
+    });
     {
         let a = app.clone();
         ui.on_select_bucket(move |i| {
@@ -655,6 +713,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let w = widget.as_weak();
         let a = app.clone();
         move || {
+            a.check_clock();
             a.remember_widget();
             let Some(widget) = w.upgrade() else { return };
             if !widget.window().is_visible() {

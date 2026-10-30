@@ -2,12 +2,14 @@
 //!
 //! The file format matches the old Electron app, so existing tasks load as-is.
 
+use crate::due::{Date, Due};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// Ordered nearest first, so `Now < Soon < Later`.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Bucket {
     #[default]
@@ -32,6 +34,16 @@ impl Bucket {
     pub fn from_key(key: &str) -> Option<Bucket> {
         Bucket::ALL.into_iter().find(|b| b.key() == key)
     }
+
+    /// Where an open task due on `date` belongs: Today when due or overdue, This week
+    /// within seven days, Someday after that.
+    pub fn for_due(date: Date, today: Date) -> Bucket {
+        match date.days() - today.days() {
+            ..=0 => Bucket::Now,
+            1..=7 => Bucket::Soon,
+            _ => Bucket::Later,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -50,6 +62,12 @@ pub struct Task {
     pub completed_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_bucket: Option<Bucket>,
+    /// Local "2026-11-07" or "2026-11-07T15:00"; see `due::Due`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due: Option<String>,
+    /// The reminder for `due` has been shown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reminded: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -81,6 +99,10 @@ impl Task {
     pub fn matches(&self, query: &str) -> bool {
         let q = query.to_lowercase();
         self.text.to_lowercase().contains(&q) || self.desc.to_lowercase().contains(&q)
+    }
+
+    pub fn due(&self) -> Option<Due> {
+        self.due.as_deref().and_then(Due::parse)
     }
 }
 
@@ -130,6 +152,8 @@ impl State {
                 created_at: now_ms(),
                 completed_at: None,
                 previous_bucket: None,
+                due: None,
+                reminded: false,
             },
         );
         self.move_to(id, bucket, 0);
@@ -214,6 +238,39 @@ impl State {
         if let Some(t) = self.find_mut(id) {
             t.desc = desc.to_string();
         }
+    }
+
+    /// Sets or clears a task's due date. An open task moves to the top of the bucket its
+    /// date belongs in (`Bucket::for_due`).
+    pub fn set_due(&mut self, id: u64, due: Option<Due>, today: Date) {
+        let Some(t) = self.find_mut(id) else { return };
+        t.due = due.map(|d| d.stored());
+        t.reminded = false;
+        if let Some(d) = due {
+            let b = Bucket::for_due(d.date, today);
+            if t.bucket != Bucket::Done && t.bucket != b {
+                self.move_to(id, b, 0);
+            }
+        }
+    }
+
+    /// For a new day: moves open tasks whose date has come closer up a bucket (Someday to
+    /// This week to Today), to the top, keeping their order. Never moves a task further
+    /// away, so one dragged out of Today stays out. Returns whether any moved.
+    pub fn roll_over(&mut self, today: Date) -> bool {
+        let moves: Vec<(u64, Bucket)> = self
+            .tasks
+            .iter()
+            .filter(|t| t.bucket != Bucket::Done)
+            .filter_map(|t| {
+                let b = Bucket::for_due(t.due()?.date, today);
+                (b < t.bucket).then_some((t.id, b))
+            })
+            .collect();
+        for &(id, b) in moves.iter().rev() {
+            self.move_to(id, b, 0);
+        }
+        !moves.is_empty()
     }
 
     /// Trims edited text and drops tasks whose title was cleared.
@@ -425,6 +482,37 @@ mod tests {
         let t = &s.tasks[0];
         assert!(t.matches("") && t.matches("milk") && t.matches("CORNER"));
         assert!(!t.matches("bread"));
+    }
+
+    #[test]
+    fn due_date_picks_the_bucket() {
+        let today = Date::new(2026, 10, 30).unwrap();
+        let on = |m, d| Some(Due { date: Date::new(2026, m, d).unwrap(), time: None });
+        let mut s = state_with(4, Bucket::Now); // now: 4,3,2,1
+        s.set_due(1, on(11, 6), today); // 7 days
+        s.set_due(2, on(11, 7), today); // 8 days
+        s.set_due(3, on(10, 29), today); // overdue
+        s.set_due(4, Some(Due { date: today, time: Some(900) }), today);
+        assert_eq!(ids(&s, Bucket::Now), vec![4, 3]);
+        assert_eq!(ids(&s, Bucket::Soon), vec![1]);
+        assert_eq!(ids(&s, Bucket::Later), vec![2]);
+        assert_eq!(s.tasks.iter().find(|t| t.id == 2).unwrap().due.as_deref(), Some("2026-11-07"));
+    }
+
+    #[test]
+    fn roll_over_moves_tasks_closer_as_their_day_nears() {
+        let day = |m, d| Date::new(2026, m, d).unwrap();
+        let mut s = state_with(3, Bucket::Later); // later: 3,2,1
+        for id in [3, 1] {
+            s.set_due(id, Some(Due { date: day(11, 20), time: None }), day(10, 1));
+        }
+        s.add("today", Bucket::Now); // 4
+        assert!(!s.roll_over(day(11, 1)));
+        assert!(s.roll_over(day(11, 13)));
+        assert_eq!(ids(&s, Bucket::Soon), vec![3, 1]);
+        assert_eq!(ids(&s, Bucket::Later), vec![2]);
+        assert!(s.roll_over(day(11, 20)));
+        assert_eq!(ids(&s, Bucket::Now), vec![3, 1, 4]);
     }
 
     #[test]

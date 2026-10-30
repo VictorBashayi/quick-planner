@@ -20,7 +20,8 @@ RAM/CPU, a calmer and less generic look, one `.exe` with no Node/npx.
 ## Data
 Same file and JSON shape as the Electron app, so tasks carry over and either app can read it:
 `%APPDATA%\quick-planner\planner-tasks.json`
-(`tasks[] {id,text,desc,bucket,completed,createdAt,completedAt?,previousBucket?}`,
+(`tasks[] {id,text,desc,bucket,completed,createdAt,completedAt?,previousBucket?,due?,reminded?}`,
+see `due-dates.md` for the last two),
 `selectedBucket`, `collapsed`, `nextId`). Saves are debounced (300 ms) and atomic
 (write temp file, rename).
 
