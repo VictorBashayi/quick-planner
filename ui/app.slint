@@ -144,6 +144,8 @@ component TaskRow inherits Rectangle {
     in property <length> drag-y;
     in property <bool> lifted;
     in property <bool> drop-line;
+    // Off while searching: dropping into a filtered list has no clear index.
+    in property <bool> draggable: true;
 
     callback toggled(int);
     callback deleted(int);
@@ -181,7 +183,7 @@ component TaskRow inherits Rectangle {
     row-ta := TouchArea {
         mouse-cursor: root.drag-started ? grabbing : default;
         moved => {
-            if (self.pressed && !root.drag-started && !root.editing
+            if (self.pressed && root.draggable && !root.drag-started && !root.editing
                     && abs(self.mouse-x - self.pressed-x) + abs(self.mouse-y - self.pressed-y) > 5px) {
                 root.drag-started = true;
                 root.drag-start(root.task.id, root.task.title, self.pressed-x, self.pressed-y, root.width);
@@ -504,6 +506,7 @@ export component AppWindow inherits Window {
     callback clear-done();
     callback undo();
     callback redo();
+    callback search(string);
     callback hide-window();
     callback start-move();
     callback start-resize();
@@ -525,7 +528,27 @@ export component AppWindow inherits Window {
     property <length> list-top: list.absolute-position.y;
     property <bool> drag-in-list: root.dragging && root.drag-y >= root.list-top && root.drag-y < root.list-top + list.height;
 
+    // The add box and the search box share a slot; Ctrl+F swaps them.
+    property <bool> searching;
+    property <bool> filtering: search-input.text != "";
+
     public function focus-input() {
+        if (root.searching) {
+            search-input.focus();
+        } else {
+            add-input.focus();
+        }
+    }
+
+    function open-search() {
+        root.searching = true;
+        search-input.focus();
+    }
+
+    function close-search() {
+        search-input.text = "";
+        root.search("");
+        root.searching = false;
         add-input.focus();
     }
 
@@ -564,6 +587,21 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     alignment: center;
                     IconButton {
+                        active: root.searching;
+                        icon: "M 7 3 A 4 4 0 1 0 7 11 A 4 4 0 1 0 7 3 M 10 10 L 13 13";
+                        clicked => {
+                            if (root.searching) {
+                                root.close-search();
+                            } else {
+                                root.open-search();
+                            }
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
                         active: root.pinned;
                         icon: "M 6 2.5 L 10 2.5 M 6.8 2.5 L 6.3 7 L 4.5 9 L 11.5 9 L 9.7 7 L 9.2 2.5 M 8 9 L 8 13.5";
                         clicked => {
@@ -597,9 +635,11 @@ export component AppWindow inherits Window {
                 border-radius: 10px;
                 background: Palette.surface;
                 border-width: 1px;
-                border-color: add-input.has-focus ? Palette.coffee : Palette.hairline;
+                border-color: add-input.has-focus || search-input.has-focus ? Palette.coffee : Palette.hairline;
 
                 add-input := TextInput {
+                    visible: !root.searching;
+                    enabled: !root.searching;
                     x: 14px;
                     width: parent.width - 28px;
                     height: parent.height;
@@ -630,6 +670,10 @@ export component AppWindow inherits Window {
                                 return accept;
                             }
                         }
+                        if (event.modifiers.control && event.text == "f") {
+                            root.open-search();
+                            return accept;
+                        }
                         if (event.modifiers.control && event.text == "1") {
                             root.select-bucket(0);
                             return accept;
@@ -646,11 +690,34 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if add-input.text == "": Text {
+                search-input := TextInput {
+                    visible: root.searching;
+                    enabled: root.searching;
+                    x: 14px;
+                    width: parent.width - 28px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    font-size: 14px;
+                    color: Palette.espresso;
+                    selection-background-color: Palette.crema;
+                    selection-foreground-color: Palette.espresso;
+                    edited => {
+                        root.search(self.text);
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.close-search();
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+
+                if (root.searching ? search-input.text : add-input.text) == "": Text {
                     x: 14px;
                     height: parent.height;
                     vertical-alignment: center;
-                    text: "Add a task";
+                    text: root.searching ? "Search tasks" : "Add a task";
                     font-size: 14px;
                     color: Palette.faint;
                 }
@@ -684,6 +751,17 @@ export component AppWindow inherits Window {
                 padding-right: 10px;
                 padding-bottom: 12px;
 
+                if root.filtering && root.buckets.length == 0: HorizontalLayout {
+                    padding-left: 10px;
+                    Text {
+                        height: 46px;
+                        vertical-alignment: center;
+                        text: "No tasks match.";
+                        font-size: 12.5px;
+                        color: Palette.faint;
+                    }
+                }
+
                 for bucket in root.buckets: VerticalLayout {
                     header := Rectangle {
                         height: 46px;
@@ -696,8 +774,10 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        // Search shows every matching bucket open, so collapsing waits until it ends.
                         header-ta := TouchArea {
-                            mouse-cursor: pointer;
+                            enabled: !root.filtering;
+                            mouse-cursor: self.enabled ? pointer : default;
                             clicked => {
                                 root.toggle-collapsed(bucket.key);
                             }
@@ -718,8 +798,9 @@ export component AppWindow inherits Window {
 
                             Rectangle { }
 
-                            // Two clicks to clear: the first arms it for 3 seconds.
-                            if bucket.key == "done" && bucket.tasks.length > 0: Text {
+                            // Two clicks to clear: the first arms it for 3 seconds. Hidden while
+                            // searching, since it clears every done task, not just the matches.
+                            if bucket.key == "done" && bucket.tasks.length > 0 && !root.filtering: Text {
                                 text: root.clear-armed ? "Clear " + bucket.tasks.length + "?" : "Clear";
                                 font-size: 12px;
                                 color: root.clear-armed ? Palette.coffee : clear-ta.has-hover ? Palette.espresso : Palette.faint;
@@ -772,6 +853,7 @@ export component AppWindow inherits Window {
                             drag-active: root.drag-in-list;
                             drag-y: root.drag-y;
                             lifted: root.drag-id == task.id;
+                            draggable: !root.filtering;
                             drop-line: root.dragging && root.drop-bucket == bucket.key && root.drop-index == i;
                             toggled(id) => {
                                 root.toggle-task(id);

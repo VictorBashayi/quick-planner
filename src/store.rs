@@ -76,6 +76,14 @@ impl Default for State {
     }
 }
 
+impl Task {
+    /// Case-insensitive substring match on title or note; an empty query matches all.
+    pub fn matches(&self, query: &str) -> bool {
+        let q = query.to_lowercase();
+        self.text.to_lowercase().contains(&q) || self.desc.to_lowercase().contains(&q)
+    }
+}
+
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
@@ -407,6 +415,16 @@ mod tests {
         }
         assert_eq!(steps, 50);
         assert_eq!(s.tasks.len(), 10);
+    }
+
+    #[test]
+    fn search_matches_title_or_note_ignoring_case() {
+        let mut s = State::default();
+        let id = s.add("Buy Milk", Bucket::Now).unwrap();
+        s.set_desc(id, "from the Corner shop");
+        let t = &s.tasks[0];
+        assert!(t.matches("") && t.matches("milk") && t.matches("CORNER"));
+        assert!(!t.matches("bread"));
     }
 
     #[test]

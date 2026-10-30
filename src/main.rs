@@ -26,6 +26,8 @@ struct App {
     widget: slint::Weak<WidgetWindow>,
     visible: Cell<bool>,
     placed: Cell<bool>,
+    /// Live search text; session only.
+    query: RefCell<String>,
 }
 
 impl App {
@@ -73,11 +75,14 @@ impl App {
         let state = self.state.borrow();
         let now = store::now_ms();
         let days = local_day(now).zip(local_day(now - 86_400_000));
+        let query = self.query.borrow();
+        let filtering = !query.is_empty();
         let buckets: Vec<BucketItem> = Bucket::ALL
             .into_iter()
-            .map(|b| {
+            .filter_map(|b| {
                 let tasks: Vec<TaskItem> = state
                     .tasks_in(b)
+                    .filter(|t| t.matches(&query))
                     .map(|t| TaskItem {
                         id: t.id as i32,
                         title: t.text.as_str().into(),
@@ -91,13 +96,17 @@ impl App {
                         },
                     })
                     .collect();
-                BucketItem {
+                // While searching, buckets without matches are hidden and the rest shown open.
+                if filtering && tasks.is_empty() {
+                    return None;
+                }
+                Some(BucketItem {
                     key: b.key().into(),
                     title: bucket_title(b).into(),
-                    collapsed: state.is_collapsed(b),
+                    collapsed: state.is_collapsed(b) && !filtering,
                     empty_text: empty_text(b).into(),
                     tasks: ModelRc::new(VecModel::from(tasks)),
-                }
+                })
             })
             .collect();
         ui.set_buckets(ModelRc::new(VecModel::from(buckets)));
@@ -412,6 +421,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         widget: widget.as_weak(),
         visible: Cell::new(false),
         placed: Cell::new(false),
+        query: RefCell::new(String::new()),
     });
     app.refresh();
 
@@ -494,6 +504,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         a.changed();
         a.ui().set_offer_undo(true);
     }));
+    {
+        let a = app.clone();
+        ui.on_search(move |text| {
+            *a.query.borrow_mut() = text.trim().to_string();
+            a.refresh();
+        });
+    }
     ui.on_undo(on(|a| a.step_history(false)));
     ui.on_redo(on(|a| a.step_history(true)));
     ui.on_show_done(on(|a| {
