@@ -94,6 +94,12 @@ impl Due {
         self.date < today || (self.date == today && self.time.is_some_and(|t| t < minute))
     }
 
+    /// Whether the reminder is due: at the due time, or at `REMIND_MINUTE` on the day when
+    /// there is no time. Past days count, so reminders missed while the PC was off still fire.
+    pub fn remind_now(&self, today: Date, minute: u32) -> bool {
+        self.date < today || (self.date == today && minute >= self.time.unwrap_or(REMIND_MINUTE))
+    }
+
     pub fn urgency(&self, today: Date, minute: u32) -> Urgency {
         if self.overdue(today, minute) {
             return Urgency::Overdue;
@@ -115,6 +121,9 @@ pub enum Urgency {
 }
 
 pub const SOON_MINUTES: u32 = 60;
+
+/// 9:00, when reminders for tasks without a time go off.
+pub const REMIND_MINUTE: u32 = 9 * 60;
 
 fn hm(h: u32, m: u32) -> Option<u32> {
     (h < 24 && m < 60).then_some(h * 60 + m)
@@ -378,6 +387,17 @@ mod tests {
         ] {
             assert_eq!(split(typed, TODAY), (typed, None), "{typed}");
         }
+    }
+
+    #[test]
+    fn reminders_fire_at_the_time_or_nine() {
+        let at = |d, time| Due { date: d, time };
+        assert!(!at(TODAY, Some(900)).remind_now(TODAY, 899));
+        assert!(at(TODAY, Some(900)).remind_now(TODAY, 900));
+        assert!(!at(TODAY, None).remind_now(TODAY, REMIND_MINUTE - 1));
+        assert!(at(TODAY, None).remind_now(TODAY, REMIND_MINUTE));
+        assert!(at(date(2026, 10, 29), Some(1400)).remind_now(TODAY, 0), "missed yesterday");
+        assert!(!at(date(2026, 10, 31), Some(0)).remind_now(TODAY, 1439));
     }
 
     #[test]

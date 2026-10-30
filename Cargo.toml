@@ -5,11 +5,13 @@ edition = "2024"
 
 [dependencies]
 global-hotkey = "0.9.0"
+png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+tauri-winrt-notification = "0.8.1"
 slint = { version = "1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "software-renderer-systemfonts", "unstable-winit-030", "accessibility"] }
 tray-icon = "0.26.1"
-windows-sys = { version = "0.61.2", features = ["Win32_Graphics_Dwm", "Win32_Foundation", "Win32_System_Threading", "Win32_Security", "Win32_System_SystemInformation", "Win32_System_Time", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Graphics_Dwm", "Win32_Foundation", "Win32_System_Threading", "Win32_Security", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Time", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
 slint-build = "1.18.1"

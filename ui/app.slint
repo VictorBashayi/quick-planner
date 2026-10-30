@@ -517,6 +517,8 @@ export component AppWindow inherits Window {
     callback start-resize();
     callback toggle-requested();
     callback show-requested();
+    // "Mark done" on a reminder toast; unlike toggle-task it never reopens a task.
+    callback complete-task(int);
     callback quit-requested();
 
     // Drag state. Positions are window coordinates.

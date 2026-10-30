@@ -273,6 +273,34 @@ impl State {
         !moves.is_empty()
     }
 
+    /// Marks open tasks whose reminder is due as reminded and returns them.
+    pub fn take_reminders(&mut self, today: Date, minute: u32) -> Vec<Task> {
+        self.tasks
+            .iter_mut()
+            .filter(|t| !t.completed && !t.reminded && t.due().is_some_and(|d| d.remind_now(today, minute)))
+            .map(|t| {
+                t.reminded = true;
+                t.clone()
+            })
+            .collect()
+    }
+
+    /// Puts back a task list from undo history. Reminders already shown stay shown while
+    /// the date is unchanged, so undoing an older edit doesn't fire them again.
+    pub fn restore(&mut self, mut tasks: Vec<Task>) {
+        for t in &mut tasks {
+            t.reminded |= self.tasks.iter().any(|o| o.id == t.id && o.due == t.due && o.reminded);
+        }
+        self.tasks = tasks;
+    }
+
+    /// Marks an open task done; a done one stays done.
+    pub fn complete(&mut self, id: u64) {
+        if self.tasks.iter().any(|t| t.id == id && !t.completed) {
+            self.toggle(id);
+        }
+    }
+
     /// Trims edited text and drops tasks whose title was cleared.
     pub fn tidy(&mut self) {
         for t in &mut self.tasks {
@@ -513,6 +541,29 @@ mod tests {
         assert_eq!(ids(&s, Bucket::Later), vec![2]);
         assert!(s.roll_over(day(11, 20)));
         assert_eq!(ids(&s, Bucket::Now), vec![3, 1, 4]);
+    }
+
+    #[test]
+    fn reminders_fire_once_and_survive_undo() {
+        let today = Date::new(2026, 10, 30).unwrap();
+        let mut s = state_with(3, Bucket::Now);
+        let at = |time| Some(Due { date: today, time: Some(time) });
+        s.set_due(1, at(600), today);
+        s.set_due(2, at(700), today);
+        s.set_due(3, at(600), today);
+        s.toggle(3);
+        let before = s.tasks.clone();
+        let ids = |v: Vec<Task>| v.iter().map(|t| t.id).collect::<Vec<_>>();
+        assert_eq!(ids(s.take_reminders(today, 650)), vec![1], "done tasks don't remind");
+        assert_eq!(ids(s.take_reminders(today, 650)), Vec::<u64>::new());
+        s.restore(before);
+        assert!(s.take_reminders(today, 650).is_empty(), "undo keeps it reminded");
+        s.set_due(1, at(800), today);
+        assert!(!s.tasks.iter().find(|t| t.id == 1).unwrap().reminded, "a new date reminds again");
+        s.complete(3);
+        assert!(s.tasks.iter().find(|t| t.id == 3).unwrap().completed, "complete keeps done tasks done");
+        s.complete(2);
+        assert!(s.tasks.iter().find(|t| t.id == 2).unwrap().completed);
     }
 
     #[test]

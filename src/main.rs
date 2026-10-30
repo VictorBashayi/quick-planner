@@ -2,6 +2,7 @@
 
 mod due;
 mod icon;
+mod notify;
 mod store;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
@@ -54,7 +55,7 @@ impl App {
         let mut history = self.history.borrow_mut();
         let Some(tasks) = (if redo { history.redo() } else { history.undo() }) else { return };
         drop(history);
-        self.state.borrow_mut().tasks = tasks;
+        self.state.borrow_mut().restore(tasks);
         self.ui().set_offer_undo(false);
         self.refresh();
         self.schedule_save();
@@ -65,6 +66,7 @@ impl App {
     /// and not otherwise, since a redraw ends any edit in progress.
     fn check_clock(self: &Rc<Self>) {
         let (today, minute) = now_local();
+        self.remind(today, minute);
         let new_day = self.day.replace(Some(today)) != Some(today);
         if new_day && self.state.borrow_mut().roll_over(today) {
             return self.changed();
@@ -72,6 +74,37 @@ impl App {
         if new_day || urgencies(&self.state.borrow(), today, minute) != *self.urgencies.borrow() {
             self.refresh();
         }
+    }
+
+    /// Shows a toast for each reminder that has come due, or one summary toast when
+    /// several come due at once, as after the PC was off.
+    fn remind(self: &Rc<Self>, today: due::Date, minute: u32) {
+        let tasks = self.state.borrow_mut().take_reminders(today, minute);
+        let (title, body, note, id) = match tasks.as_slice() {
+            [] => return,
+            [t] => {
+                let d = t.due().expect("only tasks with a date remind");
+                let when = if d.date == today {
+                    format!("Due {}", d.time.map(due::time_name).unwrap_or_else(|| "today".into()))
+                } else {
+                    due::label(d, today, minute)
+                };
+                (t.text.clone(), when, t.desc.lines().next().unwrap_or_default().to_string(), Some(t.id))
+            }
+            _ => {
+                let titles: Vec<&str> = tasks.iter().map(|t| t.text.as_str()).collect();
+                (format!("{} tasks are due", tasks.len()), titles.join(", "), String::new(), None)
+            }
+        };
+        self.schedule_save();
+        let w = self.window.clone();
+        notify::show(&title, &body, &note, id.is_some(), move |click| {
+            w.upgrade_in_event_loop(move |ui| match (click, id) {
+                (notify::Click::Done, Some(id)) => ui.invoke_complete_task(id as i32),
+                _ => ui.invoke_show_requested(),
+            })
+            .ok();
+        });
     }
 
     fn schedule_save(self: &Rc<Self>) {
@@ -457,6 +490,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let widget = WidgetWindow::new()?;
     let path = store::data_path();
     let state = store::load(&path);
+    if let Some(dir) = path.parent() {
+        notify::register(dir);
+    }
     let app = Rc::new(App {
         history: RefCell::new(History::new(&state.tasks)),
         state: RefCell::new(state),
@@ -507,6 +543,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let a = app.clone();
         ui.on_toggle_task(move |id| {
             a.state.borrow_mut().toggle(id as u64);
+            a.changed();
+        });
+    }
+    {
+        let a = app.clone();
+        ui.on_complete_task(move |id| {
+            a.state.borrow_mut().complete(id as u64);
             a.changed();
         });
     }
